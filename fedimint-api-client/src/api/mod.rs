@@ -668,6 +668,33 @@ impl IClientConnector for WebsocketConnector {
             })?,
         };
 
+        // Static overrides for FMO since it doesn't support API announcements yet.
+        const API_REPLACEMENT_LIST: &[(&str, &str)] = &[
+            (
+                "wss://fedimintd.fedimint.freedommint.xyz/",
+                "wss://fedimintd.fedimint.tigerboat21.com/",
+            ),
+            ("wss://api.bitcoinprinciples.xyz/", "wss://api.d6o.org/"),
+        ];
+
+        let api_endpoint = API_REPLACEMENT_LIST
+            .iter()
+            .find_map(|(search_url, replacement_url)| {
+                if *search_url == api_endpoint.as_str() {
+                    debug!(
+                        "Replacing API URL '{}' with '{}', quick-fix for fedimint/fedimint#5482",
+                        search_url, replacement_url
+                    );
+                    Some(
+                        SafeUrl::parse(replacement_url)
+                            .expect("hardcoded replacement url is valid"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| api_endpoint.clone());
+
         #[cfg(not(target_family = "wasm"))]
         let mut client = {
             let webpki_roots = webpki_roots::TLS_SERVER_ROOTS.iter().cloned();

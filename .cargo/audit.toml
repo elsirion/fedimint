@@ -29,4 +29,8 @@ ignore = [
   "RUSTSEC-2025-0012",
   # `protobuf` crash on untrusted data
   "RUSTSEC-2024-0437",
+  # unmainatined: iroh -> postcard -> heapless -> atomic-polyfill
+  # as of 2025-08-21: waiting on postcard to upgrade to heapless 0.8
+  # https://github.com/jamesmunns/postcard/issues/121
+  "RUSTSEC-2023-0089",
 ]

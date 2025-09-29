@@ -59,9 +59,13 @@ arti-client = { workspace = true, optional = true }
 curve25519-dalek = { workspace = true, optional = true }
 iroh = { workspace = true, default-features = false, features = [
   "discovery-pkarr-dht",
+  "test-utils",
+  "metrics",
 ] }
 iroh-next = { workspace = true, default-features = false, features = [
   "discovery-pkarr-dht",
+  "test-utils",
+  "metrics",
 ] }
 jsonrpsee-ws-client = { workspace = true, features = ["tls"] }
 rustls-pki-types = { workspace = true }

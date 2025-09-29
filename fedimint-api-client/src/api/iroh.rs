@@ -79,7 +79,13 @@ impl IrohConnector {
             .collect::<anyhow::Result<BTreeMap<PeerId, NodeId>>>()?;
 
         let endpoint_stable = {
+            #[allow(unused_mut)]
             let mut builder = Endpoint::builder();
+
+            // iOS unfortunately shows a scary permission prompt if we try to create a
+            // direct connection, so for now we disable them on that platform.
+            #[cfg(target_os = "ios")]
+            let mut builder = builder.path_selection(iroh::endpoint::PathSelection::RelayOnly);
 
             for iroh_dns in iroh_dns_servers {
                 builder = builder
@@ -104,8 +110,15 @@ impl IrohConnector {
         };
         let endpoint_next = {
             let builder = iroh_next::Endpoint::builder().discovery_n0();
+
             #[cfg(not(target_family = "wasm"))]
             let builder = builder.discovery_dht();
+
+            // iOS unfortunately shows a scary permission prompt if we try to create a
+            // direct connection, so for now we disable them on that platform.
+            #[cfg(target_os = "ios")]
+            let builder = builder.path_selection(iroh_next::endpoint::PathSelection::RelayOnly);
+
             let endpoint = builder.bind().await?;
             debug!(
                 target: LOG_NET_IROH,

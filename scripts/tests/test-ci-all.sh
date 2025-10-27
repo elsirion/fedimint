@@ -174,6 +174,7 @@ function wallet_recovery_2() {
 export -f wallet_recovery_2
 
 function devimint_cli_test() {
+  export FM_RUN_TEST_TIMEOUT=60
   fm-run-test "${FUNCNAME[0]}" ./scripts/tests/devimint-cli-test.sh
 }
 export -f devimint_cli_test

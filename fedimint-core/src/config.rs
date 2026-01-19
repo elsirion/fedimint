@@ -28,6 +28,7 @@ use crate::module::{
     CoreConsensusVersion, DynCommonModuleInit, IDynCommonModuleInit, ModuleConsensusVersion,
     SerdeModuleEncoding,
 };
+use crate::net::p2p_rpc::P2pRpcMessage;
 use crate::session_outcome::SignedSessionOutcome;
 use crate::{PeerId, maybe_add_send_sync, secp256k1};
 
@@ -765,6 +766,8 @@ pub enum P2PMessage {
     SessionSignature(secp256k1::schnorr::Signature),
     SessionIndex(u64),
     SignedSessionOutcome(SerdeModuleEncoding<SignedSessionOutcome>),
+    /// Variant to build RPC message broker on
+    Rpc(P2pRpcMessage),
     Checksum(sha256::Hash),
     DkgG1(DkgMessageG1),
     DkgG2(DkgMessageG2),

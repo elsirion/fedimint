@@ -718,18 +718,51 @@ async fn handle_command(
                 Some(e.into()),
             )),
         },
-        Command::Restore { gap_limit } => match client
-            .mint_client()
-            .restore_ecash_from_federation(gap_limit, &mut task_group)
-            .await
-        {
-            Ok(_) => Ok(CliOutput::Backup),
-            Err(e) => Err(CliError::from(
-                CliErrorKind::GeneralFederationError,
-                "failed",
-                Some(e.into()),
-            )),
-        },
+        Command::Restore { gap_limit } => {
+            // First, restore notes from federation
+            match client
+                .mint_client()
+                .restore_ecash_from_federation(gap_limit, &mut task_group)
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(CliError::from(
+                        CliErrorKind::GeneralFederationError,
+                        "failed to restore from federation",
+                        Some(e.into()),
+                    ));
+                }
+            }
+
+            // Then, reissue recovered notes to detect any that were spent out-of-band.
+            // This is deferred to after restore because the mint module isn't registered
+            // during the recovery process itself.
+            // See: https://github.com/fedimint/fedimint/issues/8131
+            match client.maybe_reissue_after_recovery(&mut rng).await {
+                Ok(Some(outpoint)) => {
+                    eprintln!(
+                        "Reissued recovered notes in transaction {}. \
+                         Any OOB-spent notes will be detected.",
+                        outpoint.txid
+                    );
+                }
+                Ok(None) => {
+                    // No notes to reissue, or already reissued
+                }
+                Err(e) => {
+                    // Log the error but don't fail the restore - the notes are still recovered,
+                    // they just haven't been reissued yet. The reissuance can be retried.
+                    eprintln!(
+                        "Warning: Failed to reissue recovered notes: {}. \
+                         Notes are restored but may include OOB-spent notes.",
+                        e
+                    );
+                }
+            }
+
+            Ok(CliOutput::Backup)
+        }
         Command::WipeNotes => match client.mint_client().wipe_notes().await {
             Ok(_) => Ok(CliOutput::Backup),
             Err(e) => Err(CliError::from(

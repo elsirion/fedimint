@@ -423,6 +423,61 @@ impl<T: AsRef<ClientConfig> + Clone + Send> Client<T> {
         Ok(OutPoint { txid, out_idx: 0 })
     }
 
+    /// Reissue notes that were recovered from backup to detect OOB-spent notes.
+    ///
+    /// After wallet recovery, recovered notes may have been spent out-of-band
+    /// (e.g., by a recipient after the backup was taken). This function reissues
+    /// all recovered notes to ensure only valid, unspent notes remain in the wallet.
+    ///
+    /// This function should be called after `restore_ecash_from_federation` completes
+    /// and the client is fully initialized. The reissuance is deferred to this point
+    /// because the mint module isn't registered during recovery, which would cause
+    /// panics if we tried to reissue during the recovery process itself.
+    ///
+    /// Returns `Ok(Some(outpoint))` if notes were reissued, `Ok(None)` if there
+    /// were no notes to reissue or no pending reissuance, or an error if reissuance failed.
+    ///
+    /// See: <https://github.com/fedimint/fedimint/issues/8131>
+    pub async fn maybe_reissue_after_recovery<R: RngCore + CryptoRng>(
+        &self,
+        rng: R,
+    ) -> Result<Option<OutPoint>> {
+        // Check if there's a pending reissuance from recovery
+        if !self.mint_client().has_pending_recovery_reissuance().await {
+            return Ok(None);
+        }
+
+        // Get all notes from the database
+        let notes = self.notes().await;
+        if notes.is_empty() {
+            // No notes to reissue, just clear the flag
+            self.mint_client().clear_pending_recovery_reissuance().await;
+            return Ok(None);
+        }
+
+        info!(
+            num_notes = notes.count_items(),
+            total_amount = %notes.total_amount(),
+            "Reissuing recovered notes to detect OOB-spent notes"
+        );
+
+        // Reissue all notes
+        let outpoint = self.reissue(notes, rng).await?;
+
+        // Wait for the reissuance to complete
+        self.fetch_notes(outpoint).await?;
+
+        // Clear the pending reissuance flag
+        self.mint_client().clear_pending_recovery_reissuance().await;
+
+        info!(
+            ?outpoint,
+            "Successfully reissued recovered notes"
+        );
+
+        Ok(Some(outpoint))
+    }
+
     /// Validate signatures on notes.
     ///
     /// This function checks if signatures are valid

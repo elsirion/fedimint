@@ -23,7 +23,7 @@ use fedimint_mint_client::{BackupRequest, SignedBackupRequest};
 use tbs::{combine_valid_shares, verify_blind_share, BlindedMessage, PublicKeyShare};
 use tracing::{error, info};
 
-use super::db::NextECashNoteIndexKeyPrefix;
+use super::db::{NextECashNoteIndexKeyPrefix, RecoveryState, RecoveryStateKey};
 use super::*;
 use crate::api::MintFederationApi;
 use crate::modules::mint::{MintConsensusItem, MintInput, MintOutput};
@@ -76,6 +76,9 @@ impl MintClient {
 
         Self::wipe_notes_static(&mut dbtx).await?;
 
+        // Track the number of recovered notes before consuming the vector
+        let num_spendable_notes = snapshot.spendable_notes.len();
+
         for (amount, note) in snapshot.spendable_notes {
             let key = NoteKey {
                 amount,
@@ -93,6 +96,22 @@ impl MintClient {
             dbtx.insert_entry(&NextECashNoteIndexKey(amount), &note_idx.as_u64())
                 .await;
         }
+
+        // Mark that recovery is complete but notes need to be reissued.
+        // This defers reissuance until after the module is fully initialized,
+        // avoiding the panic that would occur if we tried to reissue during
+        // recovery when the module isn't registered yet.
+        // See: https://github.com/fedimint/fedimint/issues/8131
+        if num_spendable_notes > 0 {
+            dbtx.insert_entry(&RecoveryStateKey, &RecoveryState::PendingReissuance)
+                .await;
+            info!(
+                target: LOG_ECASH_RECOVERY,
+                num_notes = num_spendable_notes,
+                "Recovery complete. Notes will be reissued to detect OOB-spent notes."
+            );
+        }
+
         dbtx.commit_tx_result().await?;
 
         Ok(Ok(()))

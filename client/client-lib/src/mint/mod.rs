@@ -5,7 +5,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use db::{NoteKey, NoteKeyPrefix, OutputFinalizationKey, OutputFinalizationKeyPrefix};
+use db::{
+    NoteKey, NoteKeyPrefix, OutputFinalizationKey, OutputFinalizationKeyPrefix, RecoveryState,
+    RecoveryStateKey,
+};
 use fedimint_core::api::{GlobalFederationApi, MemberError, OutputOutcomeError};
 use fedimint_core::core::client::ClientModule;
 use fedimint_core::core::Decoder;
@@ -491,6 +494,30 @@ impl MintClient {
             .map(|(OutputFinalizationKey(outpoint), cfd)| (outpoint, cfd))
             .collect()
             .await
+    }
+
+    /// Check if recovery has completed but notes haven't been reissued yet.
+    ///
+    /// After wallet recovery, notes need to be reissued to detect any that
+    /// were spent out-of-band (e.g., by a recipient after the backup was taken).
+    /// This check is deferred to after module initialization to avoid panics.
+    pub async fn has_pending_recovery_reissuance(&self) -> bool {
+        self.context
+            .db
+            .begin_transaction()
+            .await
+            .get_value(&RecoveryStateKey)
+            .await
+            == Some(RecoveryState::PendingReissuance)
+    }
+
+    /// Clear the pending recovery reissuance flag.
+    ///
+    /// Should be called after successfully reissuing recovered notes.
+    pub async fn clear_pending_recovery_reissuance(&self) {
+        let mut dbtx = self.start_dbtx().await;
+        dbtx.remove_entry(&RecoveryStateKey).await;
+        dbtx.commit_tx().await;
     }
 
     pub async fn fetch_all_notes(&self) -> Vec<Result<OutPoint>> {

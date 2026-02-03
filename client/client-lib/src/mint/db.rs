@@ -14,6 +14,7 @@ pub enum DbKeyPrefix {
     PendingNotes = 0x27,
     NextECashNoteIndex = 0x2a,
     NotesPerDenomination = 0x2b,
+    RecoveryState = 0x2c,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -87,3 +88,22 @@ impl_db_lookup!(
 pub struct NotesPerDenominationKey;
 
 impl_db_record!(key = NotesPerDenominationKey, value = u16, db_prefix = 0);
+
+/// Key to track if recovery has completed but notes haven't been reissued yet.
+/// This is used to defer reissuance of recovered notes until after the module
+/// is fully initialized, avoiding panics from trying to access unregistered modules.
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct RecoveryStateKey;
+
+/// State of the recovery process
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encodable, Decodable, Serialize, Deserialize)]
+pub enum RecoveryState {
+    /// Recovery completed, notes need to be reissued to detect OOB-spent notes
+    PendingReissuance,
+}
+
+impl_db_record!(
+    key = RecoveryStateKey,
+    value = RecoveryState,
+    db_prefix = DbKeyPrefix::RecoveryState,
+);

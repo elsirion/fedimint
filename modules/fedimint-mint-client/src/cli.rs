@@ -2,6 +2,7 @@ use std::{ffi, iter};
 
 use anyhow::{anyhow, bail, ensure};
 use clap::Parser;
+use fedimint_core::core::OperationId;
 use fedimint_core::{Amount, TieredCounts};
 use futures::StreamExt;
 use serde::Serialize;
@@ -27,6 +28,18 @@ enum Opts {
     SpendExact {
         /// Comma-separated list of denominations to spend (e.g., "1,1,2,8")
         denominations: String,
+        /// Include federation invite code in the OOB notes
+        #[clap(long, default_value = "false")]
+        include_invite: bool,
+        /// Split each note into a separate [`OOBNotes`] struct instead of
+        /// combining them
+        #[clap(long, default_value = "false")]
+        split: bool,
+    },
+    /// Await a spend-exact operation to complete and output the notes
+    AwaitSpendExact {
+        /// The operation ID to await
+        operation_id: OperationId,
         /// Include federation invite code in the OOB notes
         #[clap(long, default_value = "false")]
         include_invite: bool,
@@ -118,6 +131,71 @@ pub(crate) async fn handle_cli_command(
                 .spend_notes_with_exact_denominations(denomination_counts, ())
                 .await?;
 
+            let notes = match mint
+                .subscribe_spend_notes_with_exact_denominations(operation_id)
+                .await?
+                .await_outcome()
+                .await
+                .ok_or_else(|| anyhow!("No operation outcome reached"))?
+            {
+                SpendExactState::Success(notes) => notes,
+                SpendExactState::Failed(e) => {
+                    bail!("Spend failed: {e}");
+                }
+                SpendExactState::Reissuing => {
+                    unreachable!("Unexpected final state")
+                }
+            };
+
+            // Convert to OOB notes
+            let federation_id_prefix = mint.federation_id.to_prefix();
+
+            if split {
+                // Split each note into a separate OOBNotes struct
+                let mut note_strings = Vec::new();
+
+                for (amount, note) in notes.iter_items() {
+                    let mut single_note_tiered = fedimint_core::TieredMulti::default();
+                    single_note_tiered.push(amount, *note);
+
+                    let oob_note = if include_invite {
+                        OOBNotes::new_with_invite(
+                            single_note_tiered,
+                            &mint.client_ctx.get_invite_code().await,
+                        )
+                    } else {
+                        OOBNotes::new(federation_id_prefix, single_note_tiered)
+                    };
+
+                    note_strings.push(oob_note.to_string());
+                }
+
+                Ok(json!({
+                    "notes": note_strings,
+                    "amount_msat": notes.total_amount(),
+                }))
+            } else {
+                // Combine all notes into a single OOBNotes struct
+                let oob_notes = if include_invite {
+                    OOBNotes::new_with_invite(
+                        notes.clone(),
+                        &mint.client_ctx.get_invite_code().await,
+                    )
+                } else {
+                    OOBNotes::new(federation_id_prefix, notes.clone())
+                };
+
+                Ok(json!({
+                    "notes": oob_notes.to_string(),
+                    "amount_msat": notes.total_amount(),
+                }))
+            }
+        }
+        Opts::AwaitSpendExact {
+            operation_id,
+            include_invite,
+            split,
+        } => {
             let notes = match mint
                 .subscribe_spend_notes_with_exact_denominations(operation_id)
                 .await?

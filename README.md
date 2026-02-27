@@ -1,6 +1,6 @@
 <h1 align="center">
   <a href="https://fedimint.org">
-    Fedimint
+    Fedimint is great
   </a>
 </h1>
 

@@ -73,6 +73,12 @@ jobs:
           fi
       - name: Checkout fedimint
         uses: actions/checkout@v6
+      - name: Place yq binary in Docker build context
+        working-directory: fedimint-startos
+        run: |
+          YQ_VERSION=v4.47.1
+          curl -fsSL -o yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          chmod +x yq
       - name: Build s9pk
         id: build
         working-directory: fedimint-startos

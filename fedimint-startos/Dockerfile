@@ -1,5 +1,6 @@
 # Stage 1: Download yq in a full-featured image
 FROM alpine:latest AS downloader
+RUN apk add --no-cache curl
 ARG TARGETARCH
 ARG YQ_VERSION=v4.47.1
 RUN case "$TARGETARCH" in \
@@ -7,7 +8,7 @@ RUN case "$TARGETARCH" in \
         arm64) YQ_ARCH="arm64" ;; \
         *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
     esac && \
-    wget -O /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}" && \
+    curl -fsSL -o /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}" && \
     chmod +x /tmp/yq
 
 # Stage 2: Main image

@@ -21,6 +21,7 @@ export FM_DATA_DIR=/fedimintd
 export FM_BITCOIN_NETWORK=bitcoin
 export FM_BIND_UI=0.0.0.0:8175
 export FM_ENABLE_IROH=true
+export FEDI_STABILITY_POOL_V2_MODULE_ENABLE=1
 
 # Config file structure:
 # fedimintd-bitcoin-backend:

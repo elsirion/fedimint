@@ -1,0 +1,6 @@
+[workflow]
+starting_backend = "claude"
+
+[templates]
+
+[daemon]

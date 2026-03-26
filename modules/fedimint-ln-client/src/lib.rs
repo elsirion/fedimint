@@ -48,7 +48,9 @@ use fedimint_client_module::transaction::{
 use fedimint_client_module::{DynGlobalClientContext, sm_enum_variant_translation};
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
-use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{
+    AutocommitResultExt, DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped,
+};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{
     Amounts, ApiVersion, CommonModuleInit, ModuleCommon, ModuleInit, MultiApiVersion,
@@ -1427,28 +1429,44 @@ impl LightningClientModule {
         dbtx.commit_tx_result().await?;
 
         self.client_ctx
-            .finalize_and_submit_transaction(
-                operation_id,
-                LightningCommonInit::KIND.as_str(),
-                operation_meta_gen,
-                tx,
-            )
-            .await?;
+            .module_db()
+            .autocommit(
+                |dbtx, _| {
+                    let tx = tx.clone();
+                    let operation_meta_gen = operation_meta_gen.clone();
+                    Box::pin(async move {
+                        let out_point_range = self
+                            .client_ctx
+                            .finalize_and_submit_transaction_dbtx(dbtx, operation_id, tx)
+                            .await?;
 
-        let mut event_dbtx = self.client_ctx.module_db().begin_transaction().await;
+                        self.client_ctx
+                            .add_operation_log_entry_dbtx(
+                                dbtx,
+                                operation_id,
+                                LightningCommonInit::KIND.as_str(),
+                                operation_meta_gen(out_point_range),
+                            )
+                            .await;
 
-        self.client_ctx
-            .log_event(
-                &mut event_dbtx,
-                events::SendPaymentEvent {
-                    operation_id,
-                    amount: Amount::from_msats(amount_msat),
-                    fee,
+                        self.client_ctx
+                            .log_event(
+                                dbtx,
+                                events::SendPaymentEvent {
+                                    operation_id,
+                                    amount: Amount::from_msats(amount_msat),
+                                    fee,
+                                },
+                            )
+                            .await;
+
+                        Ok::<_, anyhow::Error>(out_point_range)
+                    })
                 },
+                None,
             )
-            .await;
-
-        event_dbtx.commit_tx().await;
+            .await
+            .unwrap_autocommit()?;
 
         Ok(OutgoingLightningPayment {
             payment_type: pay_type,

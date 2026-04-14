@@ -1,15 +1,18 @@
+use std::collections::HashSet;
 use std::io::Cursor;
 
 use bitcoin::hashes::sha256;
-use fedimint_core::core::OperationId;
+use fedimint_core::core::{ModuleInstanceId, OperationId};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::secp256k1::{Keypair, PublicKey};
 use fedimint_core::{OutPoint, TransactionId, impl_db_lookup, impl_db_record};
 use fedimint_ln_common::{LightningGateway, LightningGatewayRegistration};
+use fedimint_logging::LOG_CLIENT_MODULE_LN;
 use lightning_invoice::Bolt11Invoice;
 use serde::Serialize;
 use strum_macros::EnumIter;
+use tracing::info;
 
 use crate::pay::lightningpay::LightningPayStates;
 use crate::pay::{
@@ -288,6 +291,137 @@ pub(crate) fn get_v3_migrated_state(
         }
         _ => Ok(None),
     }
+}
+
+/// Recover receive state machines stuck in `Canceled(Timeout)` due to the bug
+/// where expired invoices could still be funded (fixed in #8348). This
+/// migration finds inactive `Canceled(Timeout)` receive SMs, removes them, and
+/// re-activates the preceding `ConfirmedInvoice` state so the SM retries
+/// waiting for a funded contract.
+#[allow(clippy::type_complexity)]
+pub(crate) fn migrate_recover_stuck_receives(
+    active_states: Vec<(Vec<u8>, OperationId)>,
+    inactive_states: Vec<(Vec<u8>, OperationId)>,
+) -> anyhow::Result<Option<(Vec<(Vec<u8>, OperationId)>, Vec<(Vec<u8>, OperationId)>)>> {
+    // Step 1: Find operation_ids with Canceled(Timeout) receive SMs
+    let mut timed_out_ops: HashSet<OperationId> = HashSet::new();
+    for (bytes, op_id) in &inactive_states {
+        if is_receive_state_variant(bytes, RECEIVE_STATES_CANCELED, Some(RECEIVE_ERROR_TIMEOUT))? {
+            timed_out_ops.insert(*op_id);
+        }
+    }
+
+    if timed_out_ops.is_empty() {
+        return Ok(None);
+    }
+
+    info!(
+        target: LOG_CLIENT_MODULE_LN,
+        count = timed_out_ops.len(),
+        "Found timed-out LN receive operations to recover"
+    );
+
+    // Step 2: Rebuild state lists, promoting ConfirmedInvoice back to active
+    let mut new_active_states = active_states;
+    let mut new_inactive_states = Vec::with_capacity(inactive_states.len());
+
+    for (bytes, op_id) in inactive_states {
+        if !timed_out_ops.contains(&op_id) {
+            new_inactive_states.push((bytes, op_id));
+            continue;
+        }
+
+        if is_receive_state_variant(&bytes, RECEIVE_STATES_CONFIRMED_INVOICE, None)? {
+            // Re-activate so the SM retries waiting for a funded contract
+            info!(
+                target: LOG_CLIENT_MODULE_LN,
+                operation_id = %op_id.fmt_short(),
+                "Re-activating ConfirmedInvoice state for timed-out LN receive"
+            );
+            new_active_states.push((bytes, op_id));
+        } else if is_receive_state_variant(
+            &bytes,
+            RECEIVE_STATES_CANCELED,
+            Some(RECEIVE_ERROR_TIMEOUT),
+        )? {
+            // Drop the erroneous terminal state
+        } else {
+            // Keep other inactive states (e.g. SubmittedOffer) as-is
+            new_inactive_states.push((bytes, op_id));
+        }
+    }
+
+    Ok(Some((new_active_states, new_inactive_states)))
+}
+
+/// Variant indices for `LightningClientStateMachines`
+const CLIENT_SM_RECEIVE: u64 = 2;
+
+/// Variant indices for `LightningReceiveStates`
+const RECEIVE_STATES_CANCELED: u64 = 1;
+const RECEIVE_STATES_CONFIRMED_INVOICE: u64 = 2;
+
+/// Variant indices for `LightningReceiveError`
+const RECEIVE_ERROR_TIMEOUT: u64 = 1;
+
+/// Check if raw state machine bytes represent a Receive SM in a specific
+/// `LightningReceiveStates` variant, optionally checking a nested enum variant
+/// (e.g. `LightningReceiveError::Timeout` inside `Canceled`).
+fn is_receive_state_variant(
+    bytes: &[u8],
+    receive_variant: u64,
+    inner_variant: Option<u64>,
+) -> anyhow::Result<bool> {
+    let Some((rv, iv)) = parse_receive_sm_variants(bytes)? else {
+        return Ok(false);
+    };
+
+    if rv != receive_variant {
+        return Ok(false);
+    }
+
+    Ok(match inner_variant {
+        Some(expected) => iv == Some(expected),
+        None => true,
+    })
+}
+
+/// Parse a raw state machine byte blob to extract the
+/// `LightningReceiveStates` variant index and (if present) one level of nested
+/// enum variant. Returns `Ok(None)` for non-Receive state machines.
+fn parse_receive_sm_variants(bytes: &[u8]) -> anyhow::Result<Option<(u64, Option<u64>)>> {
+    let decoders = ModuleDecoderRegistry::default();
+    let mut cursor = Cursor::new(bytes);
+
+    // Module instance ID (BigSize-encoded u16)
+    let _module_instance_id = ModuleInstanceId::consensus_decode_partial(&mut cursor, &decoders)?;
+
+    // LightningClientStateMachines variant
+    let ln_sm_variant = u64::consensus_decode_partial(&mut cursor, &decoders)?;
+    if ln_sm_variant != CLIENT_SM_RECEIVE {
+        return Ok(None);
+    }
+
+    // Skip variant data length (Vec<u8> length prefix)
+    let _data_len = u64::consensus_decode_partial(&mut cursor, &decoders)?;
+
+    // OperationId ([u8; 32])
+    let _operation_id = OperationId::consensus_decode_partial(&mut cursor, &decoders)?;
+
+    // LightningReceiveStates variant
+    let receive_variant = u64::consensus_decode_partial(&mut cursor, &decoders)?;
+
+    // Try to read one more level of nesting (e.g. LightningReceiveError variant
+    // inside Canceled)
+    let inner_variant = (|| -> anyhow::Result<Option<u64>> {
+        // Skip inner data length
+        let _inner_len = u64::consensus_decode_partial(&mut cursor, &decoders)?;
+        let v = u64::consensus_decode_partial(&mut cursor, &decoders)?;
+        Ok(Some(v))
+    })()
+    .unwrap_or(None);
+
+    Ok(Some((receive_variant, inner_variant)))
 }
 
 #[cfg(test)]

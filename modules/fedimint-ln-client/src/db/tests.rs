@@ -8,25 +8,33 @@ use fedimint_core::{BitcoinHash, TransactionId};
 use lightning_invoice::Bolt11Invoice;
 use rand::thread_rng;
 
-use crate::db::{get_v1_migrated_state, get_v2_migrated_state};
+use crate::db::{get_v1_migrated_state, get_v2_migrated_state, migrate_recover_stuck_receives};
 use crate::receive::{
-    LightningReceiveConfirmedInvoice, LightningReceiveStateMachine, LightningReceiveStates,
-    LightningReceiveSubmittedOffer,
+    LightningReceiveConfirmedInvoice, LightningReceiveError, LightningReceiveStateMachine,
+    LightningReceiveStates, LightningReceiveSubmittedOffer,
 };
 use crate::{LightningClientStateMachines, ReceivingKey};
 
-#[tokio::test]
-async fn test_sm_migration_to_v2_submitted() {
-    let instance_id = 0x42;
-
-    let dummy_invoice = Bolt11Invoice::from_str(
+fn dummy_invoice() -> Bolt11Invoice {
+    Bolt11Invoice::from_str(
         "lntbs1u1pj8308gsp5xhxz908q5usddjjm6mfq6nwc2nu62twwm6za69d32kyx8h49a4hqpp5j5egfqw9kf5e96nk\
         6htr76a8kggl0xyz3pzgemv887pya4flguzsdp5235xzmntwvsxvmmjypex2en4dejxjmn8yp6xsefqvesh2cm9wsss\
         cqp2rzjq0ag45qspt2vd47jvj3t5nya5vsn0hlhf5wel8h779npsrspm6eeuqtjuuqqqqgqqyqqqqqqqqqqqqqqqc9q\
         yysgqddrv0jqhyf3q6z75rt7nrwx0crxme87s8rx2rt8xr9slzu0p3xg3f3f0zmqavtmsnqaj5v0y5mdzszah7thrmg\
         2we42dvjggjkf44egqheymyw",
     )
-    .expect("Invalid invoice");
+    .expect("Invalid invoice")
+}
+
+fn encode_state(instance_id: u16, sm: LightningClientStateMachines) -> Vec<u8> {
+    sm.into_dyn(instance_id).consensus_encode_to_vec()
+}
+
+#[tokio::test]
+async fn test_sm_migration_to_v2_submitted() {
+    let instance_id = 0x42;
+
+    let dummy_invoice = dummy_invoice();
     let claim_key = Keypair::new(SECP256K1, &mut thread_rng());
     let operation_id = OperationId::new_random();
     let txid = TransactionId::from_byte_array([42; 32]);
@@ -90,14 +98,7 @@ async fn test_sm_migration_to_v2_confirmed() -> anyhow::Result<()> {
     let operation_id = OperationId::new_random();
     let instance_id = 0x42;
     let claim_key = Keypair::new(SECP256K1, &mut thread_rng());
-    let dummy_invoice = Bolt11Invoice::from_str(
-        "lntbs1u1pj8308gsp5xhxz908q5usddjjm6mfq6nwc2nu62twwm6za69d32kyx8h49a4hqpp5j5egfqw9kf5e96nk\
-        6htr76a8kggl0xyz3pzgemv887pya4flguzsdp5235xzmntwvsxvmmjypex2en4dejxjmn8yp6xsefqvesh2cm9wsss\
-        cqp2rzjq0ag45qspt2vd47jvj3t5nya5vsn0hlhf5wel8h779npsrspm6eeuqtjuuqqqqgqqyqqqqqqqqqqqqqqqc9q\
-        yysgqddrv0jqhyf3q6z75rt7nrwx0crxme87s8rx2rt8xr9slzu0p3xg3f3f0zmqavtmsnqaj5v0y5mdzszah7thrmg\
-        2we42dvjggjkf44egqheymyw",
-    )
-    .expect("Invalid invoice");
+    let dummy_invoice = dummy_invoice();
 
     let confirmed_variant: Vec<u8> = {
         let mut bytes = Vec::new();
@@ -157,14 +158,7 @@ async fn test_sm_migration_to_v2_confirmed() -> anyhow::Result<()> {
 async fn test_sm_migration_to_v3_submitted() {
     let instance_id = 0x42;
 
-    let dummy_invoice = Bolt11Invoice::from_str(
-        "lntbs1u1pj8308gsp5xhxz908q5usddjjm6mfq6nwc2nu62twwm6za69d32kyx8h49a4hqpp5j5egfqw9kf5e96nk\
-        6htr76a8kggl0xyz3pzgemv887pya4flguzsdp5235xzmntwvsxvmmjypex2en4dejxjmn8yp6xsefqvesh2cm9wsss\
-        cqp2rzjq0ag45qspt2vd47jvj3t5nya5vsn0hlhf5wel8h779npsrspm6eeuqtjuuqqqqgqqyqqqqqqqqqqqqqqqc9q\
-        yysgqddrv0jqhyf3q6z75rt7nrwx0crxme87s8rx2rt8xr9slzu0p3xg3f3f0zmqavtmsnqaj5v0y5mdzszah7thrmg\
-        2we42dvjggjkf44egqheymyw",
-    )
-    .expect("Invalid invoice");
+    let dummy_invoice = dummy_invoice();
     let claim_key = Keypair::new(SECP256K1, &mut thread_rng());
     let operation_id = OperationId::new_random();
     let txid = TransactionId::from_byte_array([42; 32]);
@@ -221,4 +215,102 @@ async fn test_sm_migration_to_v3_submitted() {
         new_active_states[0],
         (new_state.consensus_encode_to_vec(), operation_id)
     );
+}
+
+#[tokio::test]
+async fn test_recover_stuck_receives_migration() {
+    let instance_id = 0x42;
+    let operation_id = OperationId::new_random();
+    let claim_key = Keypair::new(SECP256K1, &mut thread_rng());
+    let invoice = dummy_invoice();
+    let txid = TransactionId::from_byte_array([42; 32]);
+
+    // Build the three inactive states for a timed-out receive operation:
+    // SubmittedOffer (first state), ConfirmedInvoice (second), Canceled(Timeout)
+    // (terminal)
+    let submitted_offer_bytes = encode_state(
+        instance_id,
+        LightningClientStateMachines::Receive(LightningReceiveStateMachine {
+            operation_id,
+            state: LightningReceiveStates::SubmittedOffer(LightningReceiveSubmittedOffer {
+                offer_txid: txid,
+                invoice: invoice.clone(),
+                receiving_key: ReceivingKey::Personal(claim_key),
+            }),
+        }),
+    );
+
+    let confirmed_invoice_bytes = encode_state(
+        instance_id,
+        LightningClientStateMachines::Receive(LightningReceiveStateMachine {
+            operation_id,
+            state: LightningReceiveStates::ConfirmedInvoice(LightningReceiveConfirmedInvoice {
+                invoice: invoice.clone(),
+                receiving_key: ReceivingKey::Personal(claim_key),
+            }),
+        }),
+    );
+
+    let canceled_timeout_bytes = encode_state(
+        instance_id,
+        LightningClientStateMachines::Receive(LightningReceiveStateMachine {
+            operation_id,
+            state: LightningReceiveStates::Canceled(LightningReceiveError::Timeout),
+        }),
+    );
+
+    // Also add an unrelated operation that should not be affected
+    let other_op_id = OperationId::new_random();
+    let other_canceled_bytes = encode_state(
+        instance_id,
+        LightningClientStateMachines::Receive(LightningReceiveStateMachine {
+            operation_id: other_op_id,
+            state: LightningReceiveStates::Canceled(LightningReceiveError::Rejected),
+        }),
+    );
+
+    let active_states: Vec<(Vec<u8>, OperationId)> = vec![];
+    let inactive_states: Vec<(Vec<u8>, OperationId)> = vec![
+        (submitted_offer_bytes.clone(), operation_id),
+        (confirmed_invoice_bytes.clone(), operation_id),
+        (canceled_timeout_bytes, operation_id),
+        (other_canceled_bytes.clone(), other_op_id),
+    ];
+
+    let (new_active, new_inactive) = migrate_recover_stuck_receives(active_states, inactive_states)
+        .expect("Migration failed")
+        .expect("Migration should produce output");
+
+    // ConfirmedInvoice should now be active
+    assert_eq!(new_active.len(), 1);
+    assert_eq!(new_active[0], (confirmed_invoice_bytes, operation_id));
+
+    // Canceled(Timeout) should be removed, SubmittedOffer and unrelated state kept
+    assert_eq!(new_inactive.len(), 2);
+    assert_eq!(new_inactive[0], (submitted_offer_bytes, operation_id));
+    assert_eq!(new_inactive[1], (other_canceled_bytes, other_op_id));
+}
+
+#[tokio::test]
+async fn test_recover_stuck_receives_no_timeout() {
+    let instance_id = 0x42;
+    let operation_id = OperationId::new_random();
+
+    // Only a Canceled(Rejected) state, not Timeout — migration should be a no-op
+    let canceled_rejected_bytes = encode_state(
+        instance_id,
+        LightningClientStateMachines::Receive(LightningReceiveStateMachine {
+            operation_id,
+            state: LightningReceiveStates::Canceled(LightningReceiveError::Rejected),
+        }),
+    );
+
+    let active_states: Vec<(Vec<u8>, OperationId)> = vec![];
+    let inactive_states = vec![(canceled_rejected_bytes, operation_id)];
+
+    let result =
+        migrate_recover_stuck_receives(active_states, inactive_states).expect("Migration failed");
+
+    // No timed-out operations, so migration returns None (no changes)
+    assert!(result.is_none());
 }

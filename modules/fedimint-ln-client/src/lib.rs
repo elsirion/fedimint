@@ -420,6 +420,10 @@ impl ClientModuleInit for LightningClientInit {
             })
         });
 
+        migrations.insert(DatabaseVersion(4), |_, active_states, inactive_states| {
+            Box::pin(async { db::migrate_recover_stuck_receives(active_states, inactive_states) })
+        });
+
         migrations
     }
 

@@ -92,6 +92,7 @@ members = [
     "modules/fedimint-walletv2-common",
     "modules/fedimint-walletv2-server",
     "modules/fedimint-walletv2-tests",
+    "tools/ln-latency-bench",
     "utils/portalloc",
 ]
 resolver = "2"

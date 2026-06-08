@@ -37,6 +37,7 @@ jobs:
           author_association=$(jq -r '.comment.author_association // ""' "${GITHUB_EVENT_PATH}")
           comment_id=$(jq -r '.comment.id // ""' "${GITHUB_EVENT_PATH}")
           comment_user=$(jq -r '.comment.user.login // ""' "${GITHUB_EVENT_PATH}")
+          api_url="${GITHUB_API_URL:-https://api.github.com}"
 
           echo "event=${EVENT_NAME}"
           echo "action=${action}"
@@ -50,13 +51,33 @@ jobs:
             exit 0
           fi
 
-          if gh api "orgs/fedimint/members/${comment_user}" --silent >/dev/null; then
-            echo "run=true" >> "${GITHUB_OUTPUT}"
-            echo "Trigger accepted: comment author is a fedimint org member"
+          if [ "${EVENT_NAME}" = "pull_request_review_comment" ]; then
+            comment_endpoint="repos/${GITHUB_REPOSITORY}/pulls/comments/${comment_id}"
           else
-            echo "run=false" >> "${GITHUB_OUTPUT}"
-            echo "Skipping: comment author is not a fedimint org member"
+            comment_endpoint="repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}"
           fi
+
+          live_author_association=$(
+            curl --fail-with-body --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_url}/${comment_endpoint}" \
+              | jq -r '.author_association // ""'
+          )
+
+          echo "live_author_association=${live_author_association:-<missing>}"
+
+          case "${live_author_association}" in
+            OWNER|MEMBER)
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              echo "Trigger accepted"
+              ;;
+            *)
+              echo "run=false" >> "${GITHUB_OUTPUT}"
+              echo "Skipping: comment author is not OWNER or MEMBER"
+              ;;
+          esac
 
       - name: Acknowledge request
         if: steps.validate.outputs.run == 'true'
@@ -67,13 +88,22 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          api_url="${GITHUB_API_URL:-https://api.github.com}"
+
           if [ "${EVENT_NAME}" = "pull_request_review_comment" ]; then
             endpoint="repos/${REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions"
           else
             endpoint="repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions"
           fi
 
-          gh api "${endpoint}" --method POST -f content='eyes'
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}/${endpoint}" \
+            --data '{"content":"eyes"}' \
+            >/dev/null
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.validate.outputs.run == 'true'

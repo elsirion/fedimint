@@ -21,15 +21,47 @@ jobs:
     if: >-
       github.repository == 'fedimint/fedimint' &&
       github.actor != 'fedimint-bot' &&
-      github.actor != 'github-actions[bot]' &&
-      contains(github.event.comment.body, '@fedimint-bot') &&
-      (
-        github.event.comment.author_association == 'OWNER' ||
-        github.event.comment.author_association == 'MEMBER'
-      )
+      github.actor != 'github-actions[bot]'
 
     steps:
+      - name: Validate agent mention
+        id: validate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          action=$(jq -r '.action // ""' "${GITHUB_EVENT_PATH}")
+          body=$(jq -r '.comment.body // ""' "${GITHUB_EVENT_PATH}")
+          author_association=$(jq -r '.comment.author_association // ""' "${GITHUB_EVENT_PATH}")
+          comment_id=$(jq -r '.comment.id // ""' "${GITHUB_EVENT_PATH}")
+          comment_user=$(jq -r '.comment.user.login // ""' "${GITHUB_EVENT_PATH}")
+
+          echo "event=${EVENT_NAME}"
+          echo "action=${action}"
+          echo "comment_id=${comment_id}"
+          echo "comment_user=${comment_user}"
+          echo "author_association=${author_association:-<missing>}"
+
+          if [[ "${body}" != *"@fedimint-bot"* ]]; then
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "Skipping: comment does not mention @fedimint-bot"
+            exit 0
+          fi
+
+          case "${author_association}" in
+            OWNER|MEMBER)
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              echo "Trigger accepted"
+              ;;
+            *)
+              echo "run=false" >> "${GITHUB_OUTPUT}"
+              echo "Skipping: comment author is not OWNER or MEMBER"
+              ;;
+          esac
+
       - name: Acknowledge request
+        if: steps.validate.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -46,11 +78,13 @@ jobs:
           gh api "${endpoint}" --method POST -f content='eyes'
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.validate.outputs.run == 'true'
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Run Codex in bubblewrap
+        if: steps.validate.outputs.run == 'true'
         env:
           BACKPORT_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
           PPQ_KEY: ${{ secrets.PPQ_KEY }}

@@ -28,6 +28,7 @@ jobs:
         id: validate
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -49,16 +50,13 @@ jobs:
             exit 0
           fi
 
-          case "${author_association}" in
-            OWNER|MEMBER)
-              echo "run=true" >> "${GITHUB_OUTPUT}"
-              echo "Trigger accepted"
-              ;;
-            *)
-              echo "run=false" >> "${GITHUB_OUTPUT}"
-              echo "Skipping: comment author is not OWNER or MEMBER"
-              ;;
-          esac
+          if gh api "orgs/fedimint/members/${comment_user}" --silent >/dev/null; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            echo "Trigger accepted: comment author is a fedimint org member"
+          else
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "Skipping: comment author is not a fedimint org member"
+          fi
 
       - name: Acknowledge request
         if: steps.validate.outputs.run == 'true'

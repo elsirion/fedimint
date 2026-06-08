@@ -145,8 +145,12 @@ if [ -e /nix/var/nix/daemon-socket ]; then
   bwrap_args+=(--bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket)
 fi
 
+if [ "$(id -G | wc -w)" -gt 1 ]; then
+  echo "Warning: unable to clear supplementary groups in this runner context" >&2
+fi
+
 # shellcheck disable=SC2016
-exec setpriv --clear-groups -- bwrap "${bwrap_args[@]}" bash -euo pipefail -c '
+exec bwrap "${bwrap_args[@]}" bash -euo pipefail -c '
   git config --global --add safe.directory /workspace
   git config --global user.name fedimint-bot
   git config --global user.email fedimint-bot@users.noreply.github.com

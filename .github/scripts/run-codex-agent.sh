@@ -20,14 +20,14 @@ require_env RUNNER_TEMP
 
 PPQ_MODEL="${PPQ_MODEL:-openai/gpt-5.5}"
 
-sandbox_root="${RUNNER_TEMP}/codex-agent"
-sandbox_home="${sandbox_root}/home"
-codex_home="${sandbox_root}/codex-home"
-context_dir="${sandbox_root}/context"
+agent_root="${RUNNER_TEMP}/codex-agent"
+agent_home="${agent_root}/home"
+codex_home="${agent_root}/codex-home"
+context_dir="${agent_root}/context"
 
-rm -rf "${sandbox_root}"
+rm -rf "${agent_root}"
 mkdir -p \
-  "${sandbox_home}" \
+  "${agent_home}" \
   "${codex_home}" \
   "${context_dir}"
 
@@ -42,6 +42,77 @@ name = "PPQ"
 base_url = "https://api.ppq.ai/v1"
 env_key = "PPQ_KEY"
 wire_api = "responses"
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true
+include_only = [
+  "PATH",
+  "HOME",
+  "CODEX_HOME",
+  "GH_TOKEN",
+  "GITHUB_ACTOR",
+  "GITHUB_EVENT_NAME",
+  "GITHUB_REPOSITORY",
+  "GITHUB_RUN_ID",
+  "GITHUB_SERVER_URL",
+  "GITHUB_WORKSPACE",
+  "RUNNER_TEMP",
+  "IN_NIX_SHELL",
+  "REPO_ROOT",
+  "CARGO_*",
+  "RUST*",
+  "CLIPPY_ARGS",
+  "FM_*",
+  "FLAKEBOX_*",
+  "NIX_*",
+  "NIXPKGS_*",
+  "CC*",
+  "CXX*",
+  "CFLAGS*",
+  "CPPFLAGS",
+  "CMAKE_*",
+  "PKG_CONFIG*",
+  "PROTOC*",
+  "AR*",
+  "AS",
+  "LD",
+  "LD_*",
+  "LD_LIBRARY_PATH",
+  "LIBCLANG_PATH",
+  "LLVM_CONFIG_PATH*",
+  "NM",
+  "OBJCOPY",
+  "OBJDUMP",
+  "RANLIB",
+  "READELF",
+  "SIZE",
+  "STRINGS",
+  "STRIP",
+  "ROCKSDB_*",
+  "SNAPPY_*",
+  "SQLITE3_*",
+  "SQLCIPHER_*",
+  "CONFIG_SHELL",
+  "SHELL",
+  "LANG",
+  "LC_*",
+  "LOCALE_ARCHIVE",
+  "TERM",
+  "TERMINFO_DIRS",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "TEMPDIR",
+  "PYTHON*",
+  "PERL5LIB",
+  "XDG_CONFIG_DIRS",
+  "XDG_DATA_DIRS",
+  "DETERMINISTIC_BUILD",
+  "SOURCE_DATE_EPOCH",
+  "SSL_CERT_FILE",
+  "NIX_SSL_CERT_FILE",
+]
 EOF
 
 jq '{
@@ -76,7 +147,8 @@ Available tools:
 - `gh`, authenticated as fedimint-bot via `GH_TOKEN`;
 - `git`;
 - normal shell tools including `bash`, `jq`, `rg`, `sed`, and `awk`;
-- Codex can run commands and edit files freely inside this bubblewrap sandbox.
+- the Fedimint Nix development shell, including its Rust toolchain and helper
+  environment, is active for commands you run.
 
 Repository conventions:
 - Follow AGENTS.md and any nested repository instructions.
@@ -87,10 +159,10 @@ Repository conventions:
 - Run focused checks when practical and report what was or was not verified.
 
 Operational rules:
-- The GitHub event payload is at `/agent/context/event.json`.
-- The checked out repository is at `/workspace`.
-- First inspect `/agent/context/event.json` to understand whether this is an
-  issue comment, PR comment, or inline PR review comment.
+- The GitHub event payload is at `$RUNNER_TEMP/codex-agent/context/event.json`.
+- The checked out repository is at `$GITHUB_WORKSPACE`.
+- First inspect the event payload to understand whether this is an issue
+  comment, PR comment, or inline PR review comment.
 - Use `gh` to fetch additional context as needed.
 - For inline PR review comments, `gh api
   repos/:owner/:repo/pulls/comments/:comment_id/replies -f body=...` can reply
@@ -106,55 +178,19 @@ Operational rules:
 - Do not wait for human input; make a reasonable decision and act.
 EOF
 
-bwrap_args=(
-  --unshare-all
-  --share-net
-  --die-with-parent
-  --new-session
-  --proc /proc
-  --dev /dev
-  --tmpfs /tmp
-  --ro-bind /nix/store /nix/store
-  --ro-bind /etc /etc
-  --bind "${GITHUB_WORKSPACE}" /workspace
-  --bind "${sandbox_root}" /agent
-  --bind "${sandbox_home}" /home/codex
-  --bind "${codex_home}" /codex-home
-  --chdir /workspace
-  --clearenv
-  --setenv HOME /home/codex
-  --setenv CODEX_HOME /codex-home
-  --setenv GITHUB_ACTOR "${GITHUB_ACTOR}"
-  --setenv GITHUB_EVENT_NAME "${GITHUB_EVENT_NAME}"
-  --setenv GITHUB_REPOSITORY "${GITHUB_REPOSITORY}"
-  --setenv GITHUB_RUN_ID "${GITHUB_RUN_ID:-}"
-  --setenv GITHUB_SERVER_URL "${GITHUB_SERVER_URL:-https://github.com}"
-  --setenv GITHUB_WORKSPACE /workspace
-  --setenv GH_TOKEN "${BACKPORT_TOKEN}"
-  --setenv PPQ_KEY "${PPQ_KEY}"
-  --setenv PATH "${PATH}"
-)
+export HOME="${agent_home}"
+export CODEX_HOME="${codex_home}"
+export GH_TOKEN="${BACKPORT_TOKEN}"
 
-for path in /bin /usr /lib /lib64 /run/current-system/sw; do
-  if [ -e "${path}" ]; then
-    bwrap_args+=(--ro-bind "${path}" "${path}")
-  fi
-done
+git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+git config --global user.name fedimint-bot
+git config --global user.email fedimint-bot@users.noreply.github.com
+gh auth status >/dev/null
+gh auth setup-git
 
-if [ -e /nix/var/nix/daemon-socket ]; then
-  bwrap_args+=(--bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket)
-fi
-
-# shellcheck disable=SC2016
-exec bwrap "${bwrap_args[@]}" bash -euo pipefail -c '
-  git config --global --add safe.directory /workspace
-  git config --global user.name fedimint-bot
-  git config --global user.email fedimint-bot@users.noreply.github.com
-  gh auth status >/dev/null
-  gh auth setup-git
-  codex exec \
-    --ephemeral \
-    --sandbox danger-full-access \
-    --ask-for-approval never \
-    "$(cat /agent/context/prompt.md)"
-'
+cd "${GITHUB_WORKSPACE}"
+exec codex exec \
+  --ephemeral \
+  --sandbox danger-full-access \
+  --ask-for-approval never \
+  "$(cat "${context_dir}/prompt.md")"

@@ -111,7 +111,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run Codex in bubblewrap
+      - name: Run Codex in Fedimint dev shell
         if: steps.validate.outputs.run == 'true'
         env:
           BACKPORT_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
@@ -121,16 +121,15 @@ jobs:
           set -euo pipefail
           nix --extra-experimental-features 'nix-command flakes' \
             --accept-flake-config \
+            develop \
+            .#default \
+            --command \
+            nix --extra-experimental-features 'nix-command flakes' \
+            --accept-flake-config \
             shell \
             github:numtide/llm-agents.nix#codex \
-            nixpkgs#bash \
-            nixpkgs#bubblewrap \
-            nixpkgs#coreutils \
-            nixpkgs#gawk \
             nixpkgs#gh \
-            nixpkgs#git \
-            nixpkgs#gnused \
             nixpkgs#jq \
             nixpkgs#ripgrep \
-            nixpkgs#util-linux \
-            -c bash .github/scripts/run-codex-agent-bwrap.sh
+            nixpkgs#curl \
+            -c bash .github/scripts/run-codex-agent.sh
